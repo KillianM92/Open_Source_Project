@@ -25,32 +25,7 @@ struct DaemonConfig {
     int SHM_SIZE;
 };
 
-struct DaemonConfig read_config() {
-    struct DaemonConfig config;
-    FILE *fp;
-    char param[30];
-    int value;
-
-    fp = fopen("demon.conf", "r");
-    if (fp == NULL) {
-        perror("Error opening config file");
-        exit(1);
-    }
-
-    while (fscanf(fp, "%s = %d\n", param, &value) != EOF) {
-        if (strcmp(param, "MIN_THREAD") == 0)
-            config.MIN_THREAD = value;
-        else if (strcmp(param, "MAX_THREAD") == 0)
-            config.MAX_THREAD = value;
-        else if (strcmp(param, "MAX_CONNECT_PER_THREAD") == 0)
-            config.MAX_CONNECT_PER_THREAD = value;
-        else if (strcmp(param, "SHM_SIZE") == 0)
-            config.SHM_SIZE = value;
-    }
-
-    fclose(fp);
-    return config;
-}
+struct DaemonConfig config; // Variable globale pour stocker la configuration
 
 // Fonction pour lire la requête du client depuis la SHM
 void read_client_request(char *shm, char *request) {
@@ -82,14 +57,14 @@ void write_results_to_shm(char *shm, char *results) {
     strcpy(shm, results);
 }
 
+// Fonction pour traiter les demandes des clients
 void *handle_client(void *arg) {
     struct ConnectionInfo *conn_info = (struct ConnectionInfo *)arg;
     int shmid = conn_info->shmid;
     char *shm_name = conn_info->shm_name;
     int connections_left = conn_info->connections_left;
 
-    char *shm, *s;
-    int n;
+    char *shm;
 
     // Attacher la SHM
     if ((shm = shmat(shmid, NULL, 0)) == (char *) -1) {
@@ -103,6 +78,11 @@ void *handle_client(void *arg) {
         char client_request[SHMSZ];
         read_client_request(shm, client_request);
 
+        // Si la requête est "END", terminer la connexion
+        if (strcmp(client_request, "END") == 0) {
+            break;
+        }
+
         // Exécuter la commande demandée par le client
         char command_result[SHMSZ];
         execute_command(client_request, command_result);
@@ -113,30 +93,62 @@ void *handle_client(void *arg) {
         // Décrémenter le nombre de connexions restantes
         connections_left--;
 
+        // Si le nombre de connexions restantes atteint 0 et MAX_CONNECT_PER_THREAD n'est pas 0, terminer le thread
         if (connections_left == 0 && config.MAX_CONNECT_PER_THREAD != 0) {
-            // Terminer proprement le thread
-            pthread_exit(NULL);
+            break;
         }
+    }
+
+    // Terminer le thread
+    pthread_exit(NULL);
+}
+
+// Fonction pour initialiser les threads
+void initialize_threads(pthread_t *tid, struct ConnectionInfo *conn_info) {
+    for (int i = 0; i < config.MIN_THREAD; i++) {
+        pthread_create(&tid[i], NULL, handle_client, (void *)conn_info);
     }
 }
 
+// Fonction pour gérer le pool de threads
+void *thread_pool_manager(void *arg) {
+    struct ConnectionInfo *conn_info = (struct ConnectionInfo *)arg;
+    pthread_t tid[config.MAX_THREAD]; // Tableau pour stocker les IDs des threads
+    int num_threads = config.MIN_THREAD;
+
+    while (1) {
+        // Si le nombre de threads descend en dessous de MIN_THREAD, en créer autant que nécessaire
+        if (num_threads < config.MIN_THREAD) {
+            for (int i = num_threads; i < config.MIN_THREAD; i++) {
+                pthread_create(&tid[i], NULL, handle_client, (void *)conn_info);
+                num_threads++;
+            }
+        }
+
+        // Accepter les demandes des clients et démarrer un thread pour chaque demande
+        // (Non implémenté ici pour des raisons de clarté, à implémenter en fonction de l'environnement)
+    }
+
+    pthread_exit(NULL);
+}
+
+// Fonction principale
 int main() {
-    struct DaemonConfig config = read_config();
     key_t key;
     int shmid;
-    char *shm, *s;
+    char *shm;
 
-    pthread_t tid;
-
-    // Vérification des paramètres lus depuis demon.conf
-    if (config.MIN_THREAD > config.MAX_THREAD) {
-        printf("Error: MIN_THREAD cannot be greater than MAX_THREAD\n");
+    // Lecture de la configuration depuis demon.conf
+    FILE *fp = fopen("demon.conf", "r");
+    if (fp == NULL) {
+        perror("Error opening config file");
         exit(1);
     }
-
-    if (config.MAX_CONNECT_PER_THREAD == 0) {
-        printf("Warning: Threads will not terminate as MAX_CONNECT_PER_THREAD is set to 0\n");
-    }
+    fscanf(fp, "MIN_THREAD = %d\n", &config.MIN_THREAD);
+    fscanf(fp, "MAX_THREAD = %d\n", &config.MAX_THREAD);
+    fscanf(fp, "MAX_CONNECT_PER_THREAD = %d\n", &config.MAX_CONNECT_PER_THREAD);
+    fscanf(fp, "SHM_SIZE = %d\n", &config.SHM_SIZE);
+    fclose(fp);
 
     // Création de la zone de mémoire partagée
     if ((key = ftok(".", 'R')) == -1) {
@@ -154,26 +166,15 @@ int main() {
         exit(1);
     }
 
+    // Création de la structure ConnectionInfo
+    struct ConnectionInfo *conn_info = malloc(sizeof(struct ConnectionInfo));
+    conn_info->shmid = shmid;
+    strcpy(conn_info->shm_name, "shared_memory");
+    conn_info->connections_left = config.MAX_CONNECT_PER_THREAD;
+
     // Initialisation des threads
-    for (int i = 0; i < config.MIN_THREAD; i++) {
-        struct ConnectionInfo *conn_info = malloc(sizeof(struct ConnectionInfo));
-        conn_info->shmid = shmid;
-        strcpy(conn_info->shm_name, "shared_memory"); // Nom de la SHM
-        conn_info->connections_left = config.MAX_CONNECT_PER_THREAD;
-        pthread_create(&tid, NULL, handle_client, (void *)conn_info);
-    }
+    pthread_t pool_manager_tid;
+    initialize_threads(&pool_manager_tid, conn_info);
 
-    // Attente de requêtes des clients
-    while (1) {
-        // Accepter les demandes des clients
-        // Créer une structure ConnectionInfo pour chaque client
-        // Démarrer un thread pour traiter chaque demande
-        struct ConnectionInfo *conn_info = malloc(sizeof(struct ConnectionInfo));
-        conn_info->shmid = shmid;
-        strcpy(conn_info->shm_name, "shared_memory"); // Nom de la SHM
-        conn_info->connections_left = config.MAX_CONNECT_PER_THREAD;
-        pthread_create(&tid, NULL, handle_client, (void *)conn_info);
-    }
-
-    exit(0);
-}
+    // Lancement du gestionnaire de pool de threads
+    pthread_create
