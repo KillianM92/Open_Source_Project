@@ -1,127 +1,136 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
-#include <sys/wait.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <string.h>
-#include <stdbool.h>
+#include <errno.h>
 
-#define FIFO_PATH "daemon_fifo"
+#define TUBE_NAME "demon_tube"
 #define CONFIG_FILE "demon.conf"
 
-struct config {
-    int min_thread;
-    int max_thread;
-    int max_connect_per_thread;
-    int shm_size;
-} cfg;
-
-struct thread_info {
+typedef struct thread_info {
     pthread_t thread_id;
     int shm_id;
+    int active;
     int connections_handled;
-    bool is_active;
-};
+    char* shm_ptr;
+} thread_info_t;
 
-struct thread_info *threads;
+int MIN_THREAD, MAX_THREAD, MAX_CONNECT_PER_THREAD, SHM_SIZE;
+pthread_mutex_t lock;
+thread_info_t* thread_pool;
+int total_threads_initialized = 0;
 
-void read_config(const char* filename) {
-    FILE* file = fopen(filename, "r");
+void load_config() {
+    FILE* file = fopen(CONFIG_FILE, "r");
     if (!file) {
-        perror("Erreur lors de l'ouverture du fichier de configuration");
+        perror("Failed to open config file");
         exit(EXIT_FAILURE);
     }
-    fscanf(file, "MIN_THREAD = %d\nMAX_THREAD = %d\nMAX_CONNECT_PER_THREAD = %d\nSHM_SIZE = %d",
-           &cfg.min_thread, &cfg.max_thread, &cfg.max_connect_per_thread, &cfg.shm_size);
+    fscanf(file, "MIN_THREAD = %d\nMAX_THREAD = %d\nMAX_CONNECT_PER_THREAD = %d\nSHM_SIZE = %d\n",
+           &MIN_THREAD, &MAX_THREAD, &MAX_CONNECT_PER_THREAD, &SHM_SIZE);
     fclose(file);
-
-    if (cfg.min_thread > cfg.max_thread) {
-        fprintf(stderr, "Erreur de configuration: MIN_THREAD > MAX_THREAD\n");
-        exit(EXIT_FAILURE);
-    }
 }
 
-void* handle_connection(void* arg) {
-    struct thread_info* info = (struct thread_info*)arg;
-    info->is_active = true;
+void* handle_client(void* arg) {
+    thread_info_t* info = (thread_info_t*)arg;
 
-    char* shm_ptr = shmat(info->shm_id, NULL, 0);
-    if (shm_ptr == (char*)-1) {
-        perror("shmat");
-        exit(EXIT_FAILURE);
-    }
-
-    while (info->connections_handled < cfg.max_connect_per_thread || cfg.max_connect_per_thread == 0) {
-        if (strcmp(shm_ptr, "END") == 0) {
-            strcpy(shm_ptr, ""); // Clear SHM
-            info->connections_handled++;
-            if (cfg.max_connect_per_thread != 0 && info->connections_handled >= cfg.max_connect_per_thread) {
-                break; // End this thread if max connections reached
+    while (info->active) {
+        if (strcmp(info->shm_ptr, "END") == 0) {
+            strcpy(info->shm_ptr, ""); // Clear command
+            pthread_mutex_lock(&lock);
+            if (--info->connections_handled <= 0 && MAX_CONNECT_PER_THREAD != 0) {
+                info->active = 0; // Mark thread as inactive
             }
-        } else if (strcmp(shm_ptr, "") != 0) {
-            char command[1024];
-            strcpy(command, shm_ptr);
-            strcpy(shm_ptr, ""); // Clear SHM
-
-            // Execute command
-            int pipefd[2];
-            pipe(pipefd);
-            if (fork() == 0) {
-                close(pipefd[0]);
-                dup2(pipefd[1], STDOUT_FILENO);
-                execlp("sh", "sh", "-c", command, NULL);
-                exit(EXIT_SUCCESS);
-            }
-            close(pipefd[1]);
-
-            wait(NULL); // Wait for command to finish
-
-            // Read command output
-            read(pipefd[0], shm_ptr, cfg.shm_size);
-            close(pipefd[0]);
+            pthread_mutex_unlock(&lock);
         }
+        usleep(100000); // Prevent busy waiting
     }
 
-    shmdt(shm_ptr);
-    info->is_active = false;
+    shmdt(info->shm_ptr);
+    shmctl(info->shm_id, IPC_RMID, NULL);
     return NULL;
 }
 
-int main() {
-    read_config(CONFIG_FILE);
-
-    threads = malloc(cfg.max_thread * sizeof(struct thread_info));
-    for (int i = 0; i < cfg.min_thread; i++) {
-        threads[i].shm_id = shmget(IPC_PRIVATE, cfg.shm_size, IPC_CREAT | 0666);
-        pthread_create(&threads[i].thread_id, NULL, handle_connection, &threads[i]);
+void initialize_thread_pool() {
+    thread_pool = malloc(MAX_THREAD * sizeof(thread_info_t));
+    for (int i = 0; i < MAX_THREAD; i++) {
+        thread_pool[i].active = 0;
+        thread_pool[i].connections_handled = 0;
+        thread_pool[i].shm_id = shmget(IPC_PRIVATE, SHM_SIZE, IPC_CREAT | 0666);
+        thread_pool[i].shm_ptr = (char*)shmat(thread_pool[i].shm_id, NULL, 0);
+        memset(thread_pool[i].shm_ptr, 0, SHM_SIZE); // Initialize SHM
     }
+}
 
-    mkfifo(FIFO_PATH, 0666);
-    int fifo_fd = open(FIFO_PATH, O_RDONLY);
-    if (fifo_fd == -1) {
-        perror("Erreur lors de l'ouverture du FIFO");
+int find_available_thread() {
+    for (int i = 0; i < MAX_THREAD; i++) {
+        if (!thread_pool[i].active || (thread_pool[i].active && thread_pool[i].connections_handled < MAX_CONNECT_PER_THREAD)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void start_demon() {
+    mkfifo(TUBE_NAME, 0666);
+    int tube_fd = open(TUBE_NAME, O_RDONLY);
+    if (tube_fd < 0) {
+        perror("Failed to open tube");
         exit(EXIT_FAILURE);
     }
 
-    char buffer[1024];
-    while (read(fifo_fd, buffer, sizeof(buffer)) > 0) {
-        // Logic to handle new connections (to be implemented)
-    }
-
-    for (int i = 0; i < cfg.max_thread; i++) {
-        if (threads[i].is_active) {
-            pthread_join(threads[i].thread_id, NULL);
-            shmctl(threads[i].
-            shmctl(threads[i].shm_id, IPC_RMID, NULL); // Remove SHM segment
+    printf("Server starting...\n");
+    while (1) {
+        char buffer[10];
+        if (read(tube_fd, buffer, sizeof(buffer)) > 0 && strcmp(buffer, "SYNC") == 0) {
+            pthread_mutex_lock(&lock);
+            int index = find_available_thread();
+            if (index != -1 && !thread_pool[index].active) {
+                thread_pool[index].active = 1;
+                thread_pool[index].connections_handled = 1; // Initialize to 1 for the new connection
+                pthread_create(&thread_pool[index].thread_id, NULL, handle_client, &thread_pool[index]);
+                printf("Thread %d started with SHM ID %d\n", index, thread_pool[index].shm_id);
+                total_threads_initialized++;
+            } else if (index != -1) {
+                thread_pool[index].connections_handled++;
+                printf("Allocating additional connection to thread %d with SHM ID %d\n", index, thread_pool[index].shm_id);
+            } else {
+                printf("No available thread. MAX_THREAD limit reached.\n");
+            }
+            pthread_mutex_unlock(&lock);
         }
     }
 
-    free(threads);
-    close(fifo_fd);
-    unlink(FIFO_PATH);
+    // Clean-up
+    close(tube_fd);
+    unlink(TUBE_NAME);
+    for (int i = 0; i < MAX_THREAD; i++) {
+        if (thread_pool[i].active) {
+            pthread_join(thread_pool[i].thread_id, NULL);
+            // Detach and remove the shared memory segment
+            shmdt(thread_pool[i].shm_ptr);
+            shmctl(thread_pool[i].shm_id, IPC_RMID, NULL);
+        }
+    }
+    free(thread_pool);
+    printf("Server shutting down...\n");
+}
+
+int main() {
+    pthread_mutex_init(&lock, NULL);
+    load_config(); // Load configuration settings
+    initialize_thread_pool(); // Initialize the thread pool based on the loaded configuration
+    start_demon(); // Start the server daemon to listen for connections and handle client requests
+
+    // Cleanup before exiting
+    pthread_mutex_destroy(&lock);
 
     return 0;
 }
+
