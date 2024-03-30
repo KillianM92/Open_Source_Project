@@ -1,13 +1,11 @@
-all: server client
 
-server: server.c
-	gcc server.c -o server -Wall -Wextra
+all: serveur client1
 
-client: client.c
-	gcc client.c -o client -Wall -Wextra
+serveur:
+	gcc serveur.c -o serveur -pthread
 
-tar: server.c client1.c cmakefile
-	tar -cf Project_Open_Source.tar server.c client.c makefile
+client1:
+	gcc client1.c -o client1
 
 clean:
-	rm -f server client
+	rm -f serveur client1
