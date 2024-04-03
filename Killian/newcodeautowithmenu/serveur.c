@@ -9,6 +9,7 @@
 #include <string.h>
 #include <pwd.h>
 #include <grp.h>
+#include <semaphore.h>
 
 #define CONFIG_FILE "demon.conf"
 #define PIPE_NAME "/tmp/demon_pipe"
@@ -39,10 +40,19 @@ typedef struct {
     int choice;
 } thread_data_t;
 
+sem_t* test_sem = NULL;
+
 void* handle_client(void* arg) {
     thread_data_t* data = (thread_data_t*)arg;
     int client_pid = data->client_pid;
     int choice = data->choice;
+
+    // Ouvrir le sémaphore pour la synchronisation
+    test_sem = sem_open("/sem_demon", 0); // Assurez-vous que le nom correspond à celui utilisé par le client
+    if (test_sem == SEM_FAILED) {
+        perror("Server: sem_open failed");
+        pthread_exit(NULL);
+    }
 
     char shm_name[256], response_pipe_name[256];
     snprintf(shm_name, sizeof(shm_name), "/demon_shm_%d", client_pid);
@@ -81,6 +91,9 @@ void* handle_client(void* arg) {
 
     close(response_pipe_fd);
 
+    // Attendre (wait) sur le sémaphore avant de lire le choix depuis la SHM
+    sem_wait(test_sem);
+
     char message[BUFFER_SIZE];
     switch(choice) {
         case 1:
@@ -105,6 +118,8 @@ void* handle_client(void* arg) {
 
     munmap(shm_ptr, BUFFER_SIZE);
     close(shm_fd);
+    // Fermer le sémaphore après utilisation
+    sem_close(test_sem);
 
     printf("Traitement du client (PID: %d) terminé.\n", client_pid);
     free(arg);

@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <string.h>
+#include <semaphore.h>
 
 #define CONFIG_FILE "demon.conf"
 #define PIPE_NAME "/tmp/demon_pipe"
@@ -14,11 +15,20 @@
 
 char received_shm_name[BUFFER_SIZE]; // Variable globale pour stocker le nom de la SHM reçu
 
+sem_t* test_sem = NULL;
+
 // Envoie une demande de connexion au serveur via le tube FIFO
 void request_connection() {
     int pipe_fd, response_pipe_fd;
     char buffer[BUFFER_SIZE], response_pipe_name[256], shm_name[256];
     int pid = getpid();
+
+    // Avant d'écrire le choix dans la SHM
+    test_sem = sem_open("/sem_demon", O_CREAT, 0666, 0);
+    if (test_sem == SEM_FAILED) {
+        perror("Client: sem_open failed");
+        exit(EXIT_FAILURE);
+    }
 
     // Préparer le nom du tube de réponse basé sur le PID du client
     snprintf(response_pipe_name, sizeof(response_pipe_name), "/tmp/response_pipe_%d", pid);
@@ -114,13 +124,18 @@ void write_choice_to_shm(int choice) {
         perror("mmap");
         close(shm_fd);
         exit(EXIT_FAILURE);
-    }
+    }  
 
     // Écrire le choix dans la SHM
     memcpy(shm_ptr, &choice, sizeof(int));
 
+    // Signaler (post) le sémaphore une fois que le choix est écrit
+    sem_post(test_sem);
+
     munmap(shm_ptr, sizeof(int));
     close(shm_fd);
+    // Fermer le sémaphore après utilisation
+    sem_close(test_sem);
 }
 
 int main() {
@@ -128,7 +143,7 @@ int main() {
     int choice;
 
     request_connection();
-    sleep(10);
+    sleep(5);
 
     do {
         choice = printMenu();
