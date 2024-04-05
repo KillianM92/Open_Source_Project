@@ -1,11 +1,13 @@
-
 all: serveur client
 
-serveur:
-	gcc serveur.c -o serveur -pthread
+serveur: serveur.c
+	gcc serveur.c -o serveur -Wall -pthread
 
-client:
-	gcc client.c -o client
+client: client.c
+	gcc client.c -o client -Wall
+
+tar: server.c client.c makefile Rapport_Projet_OpenSource_Groupe_4.pdf
+	tar -cf Projet_OpenSource_Groupe_4.tar server.c client.c makefile Rapport_Projet_OpenSource_Groupe_4.pdf
 
 clean:
-	rm -f serveur client
+	rm -f serveur client Projet_OpenSource_Groupe_4.tar
