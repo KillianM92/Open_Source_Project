@@ -11,16 +11,36 @@
 
 #define CONFIG_FILE "demon.conf"
 #define PIPE_NAME "/tmp/demon_pipe"
-#define BUFFER_SIZE 1024
 
-char received_shm_name[BUFFER_SIZE]; // Variable globale pour stocker le nom de la SHM reçu
+struct demon_config {
+    int min_thread;
+    int max_thread;
+    int max_connect_per_thread;
+    int shm_size;
+};
+
+struct demon_config read_config() {
+    struct demon_config config = {0};
+    FILE *file = fopen(CONFIG_FILE, "r");
+    if (file == NULL) {
+        perror("Erreur lors de l'ouverture du fichier de configuration");
+        exit(EXIT_FAILURE);
+    }
+    fscanf(file, "MIN_THREAD=%d\nMAX_THREAD=%d\nMAX_CONNECT_PER_THREAD=%d\nSHM_SIZE=%d\n",
+           &config.min_thread, &config.max_thread, &config.max_connect_per_thread, &config.shm_size);
+    fclose(file);
+    return config;
+}
+char received_shm_name[256]; // Variable globale pour stocker le nom de la SHM reçu
 
 sem_t* test_sem = NULL;
 
 // Envoie une demande de connexion au serveur via le tube FIFO
 void request_connection() {
+    struct demon_config config = read_config();
+
     int pipe_fd, response_pipe_fd;
-    char buffer[BUFFER_SIZE], response_pipe_name[256], shm_name[256];
+    char buffer[config.shm_size], response_pipe_name[256], shm_name[256];
     int pid = getpid();
 
     // Avant d'écrire le choix dans la SHM
@@ -32,7 +52,7 @@ void request_connection() {
 
     // Préparer le nom du tube de réponse basé sur le PID du client
     snprintf(response_pipe_name, sizeof(response_pipe_name), "/tmp/response_pipe_%d", pid);
-    snprintf(buffer, sizeof(buffer), "%d", pid);
+    snprintf(buffer, sizeof(buffer), "SYNC:%d", pid);
 
     // Créer le tube de réponse avant d'envoyer la demande de connexion
     mkfifo(response_pipe_name, 0666);
@@ -40,14 +60,17 @@ void request_connection() {
     // Envoyer la demande de connexion (PID du client)
     pipe_fd = open(PIPE_NAME, O_WRONLY);
     if (pipe_fd == -1) {
-        perror("open");
+        perror("Opening demon pipe failed");
         exit(EXIT_FAILURE);
     }
     if (write(pipe_fd, buffer, strlen(buffer) + 1) == -1) {
-        perror("write");
+        perror("Writing to demon pipe failed");
         close(pipe_fd);
         exit(EXIT_FAILURE);
     }
+
+    printf("Request sent : %s\n", buffer);
+
     close(pipe_fd);
 
     // Ouvrir le tube de réponse pour lire le nom de la SHM
@@ -73,46 +96,18 @@ int printMenu(){
     int choice;
     printf("\nMenu :\n");
     printf("1. Afficher la date\n");
-    printf("2. Afficher l'heure\n");
-    printf("3. Test\n");
-    printf("4. Test\n");
+    printf("2. Afficher l'id de l'utilisateur\n");
+    printf("3. Afficher le répertoire actuel de travail (pwd)\n");
+    printf("4. Afficher les fichiers du répertoire actuel (ls)\n");
     printf("5. Quitter\n");
     printf("Entrez votre choix : ");
     scanf("%d", &choice);
     return choice;
 }
 
-// Se connecte à la SHM spécifiée par le serveur et communique via cette SHM
-void communicate_with_server() {
-    int shm_fd;
-    void* shm_ptr;
-
-    // Ouvrir la SHM avec le nom reçu
-    shm_fd = shm_open(received_shm_name, O_RDWR, 0666);
-    if (shm_fd == -1) {
-        perror("shm_open");
-        exit(EXIT_FAILURE);
-    }
-
-    // Mapper la SHM dans l'espace d'adressage du processus
-    shm_ptr = mmap(NULL, BUFFER_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (shm_ptr == MAP_FAILED) {
-        perror("mmap");
-        close(shm_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    printf("Connecté à la SHM. Lecture des données...\n");
-
-    // Lire les données de la SHM
-    printf("Données reçues du serveur : \"%s\"\n", (char*)shm_ptr);
-
-    // Nettoyage
-    munmap(shm_ptr, BUFFER_SIZE);
-    close(shm_fd);
-}
-
 void write_choice_to_shm(int choice) {
+    struct demon_config config = read_config();
+
     int shm_fd = shm_open(received_shm_name, O_RDWR, 0666);
     if (shm_fd == -1) {
         perror("shm_open");
@@ -138,9 +133,43 @@ void write_choice_to_shm(int choice) {
     sem_close(test_sem);
 }
 
+// Se connecte à la SHM spécifiée par le serveur et communique via cette SHM
+void communicate_with_server() {
+    struct demon_config config = read_config();
+
+    int shm_fd;
+    void* shm_ptr;
+
+    // Ouvrir la SHM avec le nom reçu
+    shm_fd = shm_open(received_shm_name, O_RDWR, 0666);
+    if (shm_fd == -1) {
+        perror("shm_open");
+        exit(EXIT_FAILURE);
+    }
+
+    // Mapper la SHM dans l'espace d'adressage du processus
+    shm_ptr = mmap(NULL, config.shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (shm_ptr == MAP_FAILED) {
+        perror("mmap");
+        close(shm_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Connecté à la SHM. Lecture des données...\n");
+
+    // Lire les données de la SHM
+    printf("Données reçues du serveur : \"%s\"\n", (char*)shm_ptr);
+
+    // Nettoyage
+    munmap(shm_ptr, config.shm_size);
+    close(shm_fd);
+}
+
 int main() {
 
     int choice;
+
+    struct demon_config config = read_config();
 
     request_connection();
     sleep(5);

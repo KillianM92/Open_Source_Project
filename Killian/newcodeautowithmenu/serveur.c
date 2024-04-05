@@ -13,7 +13,6 @@
 
 #define CONFIG_FILE "demon.conf"
 #define PIPE_NAME "/tmp/demon_pipe"
-#define BUFFER_SIZE 1024
 
 struct demon_config {
     int min_thread;
@@ -35,17 +34,50 @@ struct demon_config read_config() {
     return config;
 }
 
-typedef struct {
-    int client_pid;
-    int choice;
-} thread_data_t;
+char* getUsername(uid_t uid) {
+    struct passwd *pw = getpwuid(uid);
+    if (pw != NULL) {
+        return pw->pw_name;
+    }
+    return "Unknown User";
+}
+
+char* getGroupName(gid_t gid) {
+    struct group *grp = getgrgid(gid);
+    if (grp != NULL) {
+        return grp->gr_name;
+    }
+    return "Unknown Group";
+}
+
+char* getCurrentWorkingDirectory() {
+    char *cwd;
+    char buffer[1024];
+
+    cwd = getcwd(buffer, sizeof(buffer));
+    if (cwd == NULL) {
+        perror("getcwd() error");
+        return NULL; // Retourne NULL en cas d'erreur
+    }
+
+    // Allouer de la mémoire pour le chemin du répertoire à renvoyer
+    char* cwdCopy = malloc(strlen(cwd) + 1); // +1 pour le caractère nul de fin
+    if (cwdCopy == NULL) {
+        perror("malloc() error");
+        return NULL; // Retourne NULL si l'allocation échoue
+    }
+
+    strcpy(cwdCopy, cwd); // Copier le chemin dans le nouvel espace mémoire
+    return cwdCopy; // Retourner le pointeur vers le chemin alloué dynamiquement
+}
 
 sem_t* test_sem = NULL;
 
 void* handle_client(void* arg) {
-    thread_data_t* data = (thread_data_t*)arg;
-    int client_pid = data->client_pid;
-    int choice = data->choice;
+    struct demon_config config = read_config();
+    
+    int client_pid = *(int*)arg;
+    free(arg); // Libérer la mémoire allouée pour le PID du client
 
     // Ouvrir le sémaphore pour la synchronisation
     test_sem = sem_open("/sem_demon", 0); // Assurez-vous que le nom correspond à celui utilisé par le client
@@ -63,14 +95,14 @@ void* handle_client(void* arg) {
         perror("shm_open_test_handle_client");
         pthread_exit(NULL);
     }
-    // Supposons que BUFFER_SIZE est la taille désirée pour la SHM
-    if (ftruncate(shm_fd, BUFFER_SIZE) == -1) {
+    // Supposons que la configuration de la taille de la SHM dans le fichier de conf est la taille désirée pour la SHM
+    if (ftruncate(shm_fd, config.shm_size) == -1) {
         perror("ftruncate");
         close(shm_fd);
         pthread_exit(NULL);
     }
 
-    void* shm_ptr = mmap(NULL, BUFFER_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    void* shm_ptr = mmap(NULL, config.shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (shm_ptr == MAP_FAILED) {
         perror("mmap");
         close(shm_fd);
@@ -80,7 +112,7 @@ void* handle_client(void* arg) {
     int response_pipe_fd = open(response_pipe_name, O_WRONLY);
     if (response_pipe_fd == -1) {
         perror("open response pipe");
-        munmap(shm_ptr, BUFFER_SIZE);
+        munmap(shm_ptr, config.shm_size);
         close(shm_fd);
         pthread_exit(NULL);
     }
@@ -94,19 +126,28 @@ void* handle_client(void* arg) {
     // Attendre (wait) sur le sémaphore avant de lire le choix depuis la SHM
     sem_wait(test_sem);
 
-    char message[BUFFER_SIZE];
+    // Mappage de la SHM pour lire le choix de l'utilisateur
+    int* choice_ptr = (int*)mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (choice_ptr == MAP_FAILED) {
+        perror("mmap");
+        close(shm_fd);
+    }
+
+    int choice = *choice_ptr;
+
+    char message[config.shm_size];
     switch(choice) {
         case 1:
             snprintf(message, sizeof(message), "Date : 02/04/2024"); // Exécutez et stockez le résultat de 'date'
             break;
         case 2:
-            snprintf(message, sizeof(message), "Heure : 01:00AM"); // Similaire pour l'heure
+            snprintf(message, sizeof(message), "ID : 1000"); // Similaire pour l'heure
             break;
         case 3:
-            snprintf(message, sizeof(message), "TEST3");
+            snprintf(message, sizeof(message), "Current working directory: %s\n", getCurrentWorkingDirectory());
             break;
         case 4:
-            snprintf(message, sizeof(message), "TEST4");
+            snprintf(message, sizeof(message), "client1  client1.c  demon.conf  makefile  serveur  serveur.c");
             break;
         default:
             snprintf(message, sizeof(message), "Choix non reconnu");
@@ -116,13 +157,13 @@ void* handle_client(void* arg) {
 
     sleep(10);
 
-    munmap(shm_ptr, BUFFER_SIZE);
+    munmap(shm_ptr, config.shm_size);
+    munmap(choice_ptr, sizeof(int));
     close(shm_fd);
     // Fermer le sémaphore après utilisation
     sem_close(test_sem);
 
     printf("Traitement du client (PID: %d) terminé.\n", client_pid);
-    free(arg);
     pthread_exit(NULL);
     //shm_unlink(shm_name);
 }
@@ -130,26 +171,31 @@ void* handle_client(void* arg) {
 void startdemon() {
     struct demon_config config = read_config();
 
+    char buffer[config.shm_size];
+
     printf("Serveur en attente de demandes de connexion...\n");
 
-     if (mkfifo(PIPE_NAME, 0666) == -1 && errno != EEXIST) {
+    if (mkfifo(PIPE_NAME, 0666) == -1 && errno != EEXIST) {
         perror("mkfifo");
         exit(EXIT_FAILURE);
     }
 
     int pipe_fd = open(PIPE_NAME, O_RDONLY | O_NONBLOCK);
     if (pipe_fd == -1) {
-        perror("open");
+        perror("Opening demon pipe failed");
         exit(EXIT_FAILURE);
     }
 
     while (1) {
-        char buffer[BUFFER_SIZE];
-        ssize_t read_bytes = read(pipe_fd, buffer, BUFFER_SIZE - 1);
+        ssize_t read_bytes = read(pipe_fd, buffer, config.shm_size - 1);
         if (read_bytes > 0) {
-            buffer[read_bytes] = '\0';
-            int client_pid;
-            sscanf(buffer, "%d", &client_pid); // Lecture du PID client depuis le buffer
+            buffer[read_bytes] = '\0'; // Assurer la terminaison de la chaîne
+
+            // Extraire le PID et vérification de la présence de "SYNC"
+            int* client_pid = malloc(sizeof(int));
+            if (sscanf(buffer, "SYNC:%d", client_pid) == 1) {
+                printf("SYNC request received from PID : %d\n", *client_pid);
+            }; // Lecture du PID client depuis le buffer
 
             // Préparez le nom de la SHM basé sur le PID reçu
             char shm_name[256];
@@ -166,36 +212,11 @@ void startdemon() {
                 close(shm_fd);
                 continue;
             }
-
-            // Mappage de la SHM pour lire le choix de l'utilisateur
-            int* choice_ptr = (int*)mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-            if (choice_ptr == MAP_FAILED) {
-                perror("mmap");
-                close(shm_fd);
-                continue;
-            }
-
-            // Assurez-vous que le client a le temps d'écrire son choix
-            sleep(1); // Peut-être ajuster ce délai selon le comportement observé
-
-            int choice = *choice_ptr;
-            munmap(choice_ptr, sizeof(int));
-
-            // Préparation et passage des données au thread
-            thread_data_t* data = malloc(sizeof(thread_data_t));
-            if (!data) {
-                perror("malloc");
-                continue;
-            }
-            data->client_pid = client_pid;
-            data->choice = choice;
-
+            
             pthread_t thread_id;
-            if (pthread_create(&thread_id, NULL, handle_client, (void*)data) != 0) {
+            if (pthread_create(&thread_id, NULL, handle_client, (void*)client_pid) != 0) {
                 perror("pthread_create");
-                free(data);
-                close(shm_fd);
-                continue;
+                exit(EXIT_FAILURE);
             }
             pthread_detach(thread_id);
 
@@ -209,22 +230,6 @@ void startdemon() {
     }
 
     close(pipe_fd);
-}
-
-char* getUsername(uid_t uid) {
-    struct passwd *pw = getpwuid(uid);
-    if (pw != NULL) {
-        return pw->pw_name;
-    }
-    return "Unknown User";
-}
-
-char* getGroupName(gid_t gid) {
-    struct group *grp = getgrgid(gid);
-    if (grp != NULL) {
-        return grp->gr_name;
-    }
-    return "Unknown Group";
 }
 
 int main() {
