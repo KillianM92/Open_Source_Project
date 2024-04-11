@@ -46,10 +46,9 @@ char* getCurrentDate() {
     time_t now;
     struct tm *tm_info;
 
-    // Déterminez la taille maximale nécessaire pour la chaîne de format de date et d'heure.
-    // 20 caractères pour la date et l'heure "%d-%m-%Y %H:%M:%S"
+    // 15 caractères pour la date et l'heure "%d-%m-%Y"
     // +1 pour le caractère de fin de chaîne '\0'.
-    char buffer_date[21];
+    char buffer_date[16];
 
     // Obtenir le temps courant
     time(&now);
@@ -76,10 +75,9 @@ char* getCurrentTime() {
     time_t now;
     struct tm *tm_info;
 
-    // Déterminez la taille maximale nécessaire pour la chaîne de format de date et d'heure.
-    // 20 caractères pour la date et l'heure "%d-%m-%Y %H:%M:%S"
+    // 10 caractères pour la date et l'heure "%H:%M:%S"
     // +1 pour le caractère de fin de chaîne '\0'.
-    char buffer_time[21];
+    char buffer_time[11];
 
     // Obtenir le temps courant
     time(&now);
