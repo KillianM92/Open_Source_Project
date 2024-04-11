@@ -114,7 +114,6 @@ int printMenu(){
 }
 
 void write_choice_to_shm(int choice) {
-    struct demon_config config = read_config();
 
     int shm_fd = shm_open(received_shm_name, O_RDWR, 0666);
     if (shm_fd == -1) {
@@ -177,8 +176,6 @@ void communicate_with_server() {
 int main() {
 
     int choice;
-
-    struct demon_config config = read_config();
 
     request_connection();
 
