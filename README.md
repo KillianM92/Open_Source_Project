@@ -1,8 +1,6 @@
 # Open_Source_Project
 Projet Lanceur de commandes
 
-Réalisé par Killian MOUTINARD, Samir RAHMOUNI, Mathursan MAHENDRARASAN, Alexandre MOALA & Lorie NOWICKI
-
 Module : Open Source
 
 Promo : Master 2 Cybersécurité
